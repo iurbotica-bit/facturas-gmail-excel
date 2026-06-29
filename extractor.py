@@ -26,7 +26,7 @@ def search_invoice_emails(mail: imaplib.IMAP4_SSL, unread_only: bool = True) -> 
     if unread_only:
         query = f'is:unread {query}'
         
-    status, response = mail.uid('search', 'X-GM-RAW', query)
+    status, response = mail.uid('search', 'X-GM-RAW', f'"{query}"')
     if status != 'OK':
         return []
     
