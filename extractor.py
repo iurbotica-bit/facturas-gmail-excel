@@ -75,7 +75,19 @@ def get_attachments(mail: imaplib.IMAP4_SSL, uid: str) -> List[Tuple[str, bytes,
             if is_pdf or is_image:
                 payload = part.get_payload(decode=True)
                 if payload:
-                    actual_mime = 'application/pdf' if is_pdf else mime_type
+                    # Deducir MIME type real basado en la extensión si es genérico
+                    fn_lower = filename.lower()
+                    if fn_lower.endswith('.pdf'):
+                        actual_mime = 'application/pdf'
+                    elif fn_lower.endswith(('.jpg', '.jpeg')):
+                        actual_mime = 'image/jpeg'
+                    elif fn_lower.endswith('.png'):
+                        actual_mime = 'image/png'
+                    elif fn_lower.endswith('.webp'):
+                        actual_mime = 'image/webp'
+                    else:
+                        actual_mime = mime_type
+                        
                     attachments.append((filename, payload, actual_mime))
                     
     return attachments

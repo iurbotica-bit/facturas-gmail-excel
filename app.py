@@ -76,7 +76,7 @@ def send_image_to_gmail(email_address: str, password: str, image_bytes: bytes, f
         msg.attach(MIMEText(body, 'plain'))
         
         # Adjunto
-        part = MIMEBase('application', 'octet-stream')
+        part = MIMEBase('image', 'jpeg')
         part.set_payload(image_bytes)
         encoders.encode_base64(part)
         part.add_header('Content-Disposition', f"attachment; filename={filename}")
