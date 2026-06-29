@@ -22,7 +22,7 @@ def search_invoice_emails(mail: imaplib.IMAP4_SSL, unread_only: bool = True) -> 
     mail.select("inbox")
     
     # Construcción de la consulta de búsqueda de Gmail
-    query = 'has:attachment (subject:factura OR "factura" OR subject:invoice OR "invoice" OR subject:recibo OR "recibo")'
+    query = 'has:attachment (subject:factura OR factura OR subject:invoice OR invoice OR subject:recibo OR recibo)'
     if unread_only:
         query = f'is:unread {query}'
         
