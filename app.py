@@ -3,6 +3,11 @@ import os
 import pandas as pd
 from datetime import datetime
 import traceback
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 
 import security
 import extractor
@@ -57,6 +62,34 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
+
+# Función para enviar fotos al correo propio por SMTP
+def send_image_to_gmail(email_address: str, password: str, image_bytes: bytes, filename: str) -> bool:
+    try:
+        # Configurar mensaje MIME
+        msg = MIMEMultipart()
+        msg['From'] = email_address
+        msg['To'] = email_address
+        msg['Subject'] = f"Factura: Foto Capturada {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        body = "Adjunto enviamos la foto de la factura capturada desde la aplicación web."
+        msg.attach(MIMEText(body, 'plain'))
+        
+        # Adjunto
+        part = MIMEBase('application', 'octet-stream')
+        part.set_payload(image_bytes)
+        encoders.encode_base64(part)
+        part.add_header('Content-Disposition', f"attachment; filename={filename}")
+        msg.attach(part)
+        
+        # Conexión y envío por SMTP SSL (Gmail)
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.login(email_address, password)
+        server.sendmail(email_address, email_address, msg.as_string())
+        server.close()
+        return True
+    except Exception as e:
+        raise RuntimeError(f"Error al enviar correo por SMTP: {str(e)}")
 
 # Inicializar estados de sesión
 if 'logs' not in st.session_state:
@@ -129,151 +162,210 @@ else:
 
 # Cuerpo principal de la aplicación
 st.markdown("<div class='header-title'>📊 Gestión de Gastos Automática</div>", unsafe_allow_html=True)
-st.write("Esta herramienta escanea tu correo Gmail buscando facturas adjuntas en tus correos no leídos, extrae los importes con IA (Gemini) y los añade a tu Excel trimestral.")
+st.write("Sincroniza tus facturas desde Gmail a Excel o sube fotos instantáneas de tus tickets utilizando la cámara.")
 
-# Botones de Acción
-col1, col2 = st.columns([1, 3])
-with col1:
-    btn_sincronizar = st.button("🚀 Sincronizar Gmail", disabled=st.session_state.running)
-with col2:
-    if st.button("🧹 Limpiar Consola"):
-        st.session_state.logs = []
-        st.rerun()
+# Crear las pestañas para organizar la interfaz de forma premium
+tab_dashboard, tab_camera = st.tabs(["📊 Sincronización e Historial", "📷 Hacer Foto a Factura"])
 
-# Proceso de Sincronización
-if btn_sincronizar:
-    # Validaciones previas
-    if not config.get("gmail_email") or not config.get("gmail_password") or not config.get("gemini_api_key"):
-        st.error("Por favor, introduce y guarda todas tus credenciales en el menú lateral izquierdo antes de iniciar la sincronización.")
-    else:
-        st.session_state.running = True
-        st.session_state.logs = [] # Limpiar logs anteriores
-        add_log("Iniciando proceso de escaneo y extracción...", "info")
-        
-        # Contenedor de progreso dinámico
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        try:
-            # Conexión a Gmail
-            status_text.text("Conectando con Gmail...")
-            progress_bar.progress(10)
-            mail = extractor.connect_gmail(config["gmail_email"], config["gmail_password"])
-            add_log("Conectado con éxito a Gmail.", "success")
-            
-            # Buscar correos con facturas
-            status_text.text("Buscando correos con facturas...")
-            progress_bar.progress(30)
-            uids = extractor.search_invoice_emails(mail, unread_only=True)
-            
-            if not uids:
-                add_log("No se encontraron correos no leídos con facturas adjuntas.", "info")
-                progress_bar.progress(100)
-                status_text.text("Proceso finalizado. Sin facturas nuevas.")
-            else:
-                add_log(f"Se detectaron {len(uids)} correo(s) para procesar.", "info")
-                total_emails = len(uids)
-                processed_count = 0
-                
-                for idx, uid in enumerate(uids):
-                    status_text.text(f"Procesando correo {idx+1} de {total_emails}...")
-                    # Calcular progreso relativo entre 30% y 90%
-                    rel_prog = int(30 + (idx / total_emails) * 60)
-                    progress_bar.progress(rel_prog)
-                    
-                    attachments = extractor.get_attachments(mail, uid)
-                    if not attachments:
-                        add_log(f"Correo UID {uid}: No contenía adjuntos compatibles (PDF/Imagen).", "warning")
-                        # Marcar correo como leído de todos modos para no atascarlo
-                        extractor.mark_email_as_read(mail, uid)
-                        continue
-                    
-                    for filename, file_bytes, mime_type in attachments:
-                        add_log(f"Extrayendo datos de: '{filename}'...", "info")
-                        try:
-                            # Procesar con Gemini API
-                            extracted_data = extractor.extract_invoice_data(
-                                config["gemini_api_key"], 
-                                file_bytes, 
-                                mime_type
-                            )
-                            
-                            # Guardar en Excel
-                            excel_handler.save_to_excel(config["excel_path"], extracted_data, filename)
-                            
-                            emisor = extracted_data.get('emisor', 'Desconocido')
-                            total = extracted_data.get('total', 0.0)
-                            add_log(f"Factura de '{emisor}' por un total de {total}€ guardada correctamente.", "success")
-                            
-                        except Exception as ex:
-                            add_log(f"Error procesando el archivo '{filename}': {str(ex)}", "error")
-                            
-                    # Marcar el correo como leído tras procesar sus adjuntos
-                    extractor.mark_email_as_read(mail, uid)
-                    processed_count += 1
-                
-                progress_bar.progress(100)
-                status_text.text("Sincronización completada con éxito.")
-                add_log(f"Sincronización finalizada. Procesados {processed_count} correo(s).", "success")
-                
-            mail.logout()
-            
-        except Exception as e:
-            add_log(f"Error crítico en el proceso: {str(e)}", "error")
-            st.error("Ocurrió un error inesperado durante la ejecución. Revisa la consola de logs para más detalles.")
-            st.code(traceback.format_exc())
-            
-        st.session_state.running = False
-
-# Layout Principal: Consola de Logs e Informes
-col_left, col_right = st.columns([1, 1])
-
-with col_left:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.subheader("📟 Registro de Actividad")
-    if st.session_state.logs:
-        # Mostramos los logs del revés para ver los últimos arriba
-        log_text = "\n".join(reversed(st.session_state.logs))
-        st.text_area("Logs de ejecución", value=log_text, height=350, disabled=True)
-    else:
-        st.info("La consola está vacía. Haz clic en 'Sincronizar Gmail' para iniciar el proceso.")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with col_right:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.subheader("📂 Vista Previa del Excel")
+# Pestaña 1: Sincronización e Historial (Excel editable)
+with tab_dashboard:
+    col_act, col_prev = st.columns([1, 1])
     
-    excel_file = config.get("excel_path", "")
-    if os.path.exists(excel_file):
-        try:
-            # Leer las pestañas del Excel para mostrarlas en un selector
-            xl = pd.ExcelFile(excel_file)
-            sheets = xl.sheet_names
-            if sheets:
-                selected_sheet = st.selectbox("Seleccionar Trimestre:", sheets)
-                df = pd.read_excel(excel_file, sheet_name=selected_sheet)
-                st.dataframe(df, use_container_width=True)
-                
-                # Resumen de gastos en la pestaña seleccionada
-                if "Total (€)" in df.columns:
-                    # Intentar convertir a numérico por seguridad
-                    totals = pd.to_numeric(df["Total (€)"], errors='coerce')
-                    total_gastado = totals.sum()
-                    st.metric(label=f"Total Gastado en {selected_sheet}", value=f"{total_gastado:,.2f} €")
-                
-                # Botón para descargar el archivo Excel
-                with open(excel_file, "rb") as f:
-                    st.download_button(
-                        label="📥 Descargar Excel de Gastos",
-                        data=f.read(),
-                        file_name=os.path.basename(excel_file),
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
+    with col_act:
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.subheader("🚀 Acciones")
+        
+        col_btn1, col_btn2 = st.columns([1, 1])
+        with col_btn1:
+            btn_sincronizar = st.button("🔌 Sincronizar Gmail", disabled=st.session_state.running, use_container_width=True)
+        with col_btn2:
+            if st.button("🧹 Limpiar Consola", use_container_width=True):
+                st.session_state.logs = []
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        # Procesar Sincronización
+        if btn_sincronizar:
+            if not config.get("gmail_email") or not config.get("gmail_password") or not config.get("gemini_api_key"):
+                st.error("Introduce y guarda todas tus credenciales en el menú lateral izquierdo antes de iniciar.")
             else:
-                st.warning("El archivo Excel no contiene ninguna pestaña de datos.")
-        except Exception as e:
-            st.error(f"No se pudo cargar la vista previa del Excel: {str(e)}")
-    else:
-        st.info("Aún no se ha creado el archivo Excel de salida. Se creará automáticamente al procesar la primera factura.")
+                st.session_state.running = True
+                st.session_state.logs = []
+                add_log("Iniciando proceso de escaneo y extracción...", "info")
+                
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                try:
+                    status_text.text("Conectando con Gmail...")
+                    progress_bar.progress(10)
+                    mail = extractor.connect_gmail(config["gmail_email"], config["gmail_password"])
+                    add_log("Conectado con éxito a Gmail.", "success")
+                    
+                    status_text.text("Buscando correos con facturas...")
+                    progress_bar.progress(30)
+                    uids = extractor.search_invoice_emails(mail, unread_only=True)
+                    
+                    if not uids:
+                        add_log("No se encontraron correos nuevos con facturas adjuntas.", "info")
+                        progress_bar.progress(100)
+                        status_text.text("Proceso finalizado. Sin facturas nuevas.")
+                    else:
+                        add_log(f"Se detectaron {len(uids)} correo(s) para procesar.", "info")
+                        total_emails = len(uids)
+                        processed_count = 0
+                        
+                        for idx, uid in enumerate(uids):
+                            status_text.text(f"Procesando correo {idx+1} de {total_emails}...")
+                            rel_prog = int(30 + (idx / total_emails) * 60)
+                            progress_bar.progress(rel_prog)
+                            
+                            attachments = extractor.get_attachments(mail, uid)
+                            if not attachments:
+                                add_log(f"Correo UID {uid}: No contenía adjuntos compatibles (PDF/Imagen).", "warning")
+                                extractor.mark_email_as_read(mail, uid)
+                                continue
+                            
+                            for filename, file_bytes, mime_type in attachments:
+                                add_log(f"Extrayendo datos de: '{filename}'...", "info")
+                                try:
+                                    extracted_data = extractor.extract_invoice_data(
+                                        config["gemini_api_key"], 
+                                        file_bytes, 
+                                        mime_type
+                                    )
+                                    
+                                    excel_handler.save_to_excel(config["excel_path"], extracted_data, filename)
+                                    
+                                    emisor = extracted_data.get('emisor', 'Desconocido')
+                                    total = extracted_data.get('total', 0.0)
+                                    add_log(f"Factura de '{emisor}' por un total de {total}€ guardada.", "success")
+                                    
+                                except Exception as ex:
+                                    add_log(f"Error procesando '{filename}': {str(ex)}", "error")
+                                    
+                            extractor.mark_email_as_read(mail, uid)
+                            processed_count += 1
+                        
+                        progress_bar.progress(100)
+                        status_text.text("Sincronización completada.")
+                        add_log(f"Sincronización finalizada. Procesados {processed_count} correos.", "success")
+                        
+                    mail.logout()
+                    
+                except Exception as e:
+                    add_log(f"Error crítico en el proceso: {str(e)}", "error")
+                    st.error("Ocurrió un error inesperado durante la ejecución. Revisa los logs.")
+                    st.code(traceback.format_exc())
+                    
+                st.session_state.running = False
+                st.rerun()
+                
+        # Consola de logs
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.subheader("📟 Registro de Actividad")
+        if st.session_state.logs:
+            log_text = "\n".join(reversed(st.session_state.logs))
+            st.text_area("Logs de ejecución", value=log_text, height=300, disabled=True)
+        else:
+            st.info("Consola inactiva. Haz clic en 'Sincronizar Gmail' para escanear facturas.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+# Pestaña 2: Visualización y Edición
+    with col_prev:
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.subheader("📂 Vista Previa y Edición de la Hoja de Gastos")
+        
+        excel_file = config.get("excel_path", "")
+        if os.path.exists(excel_file):
+            try:
+                xl = pd.ExcelFile(excel_file)
+                sheets = xl.sheet_names
+                if sheets:
+                    selected_sheet = st.selectbox("Seleccionar Trimestre:", sheets)
+                    df = pd.read_excel(excel_file, sheet_name=selected_sheet)
+                    
+                    st.warning("⚠️ Puedes hacer doble clic en cualquier celda para corregir los datos directamente. Al terminar, recuerda guardar los cambios.")
+                    
+                    # EDITOR DE DATOS INTERACTIVO
+                    edited_df = st.data_editor(
+                        df, 
+                        use_container_width=True, 
+                        num_rows="dynamic",
+                        key="excel_editor"
+                    )
+                    
+                    # Comprobar si el usuario ha realizado modificaciones
+                    if not edited_df.equals(df):
+                        if st.button("💾 Guardar Cambios en el Excel", use_container_width=True):
+                            try:
+                                with pd.ExcelWriter(excel_file, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+                                    edited_df.to_excel(writer, sheet_name=selected_sheet, index=False)
+                                
+                                # Re-aplicar los estilos estéticos premium
+                                excel_handler.apply_excel_styling(excel_file)
+                                st.success("¡Cambios guardados y formateados en el Excel con éxito!")
+                                st.rerun()
+                            except Exception as ex_save:
+                                st.error(f"Error al guardar los cambios: {str(ex_save)}")
+                    
+                    # Métricas de Resumen
+                    if "Total (€)" in df.columns:
+                        totals = pd.to_numeric(df["Total (€)"], errors='coerce')
+                        total_gastado = totals.sum()
+                        st.metric(label=f"Total Gastado acumulado ({selected_sheet})", value=f"{total_gastado:,.2f} €")
+                        
+                    # Botón para descargar
+                    with open(excel_file, "rb") as f:
+                        st.download_button(
+                            label="📥 Descargar Excel de Gastos",
+                            data=f.read(),
+                            file_name=os.path.basename(excel_file),
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                else:
+                    st.warning("El archivo Excel no tiene hojas válidas.")
+            except Exception as e:
+                st.error(f"No se pudo cargar la hoja de gastos: {str(e)}")
+        else:
+            st.info("El archivo Excel se generará automáticamente en cuanto proceses tu primera factura.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+# Pestaña 2: Captura por Cámara
+with tab_camera:
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.subheader("📸 Capturar Ticket / Factura con la Cámara")
+    st.write("Usa la cámara de tu móvil o portátil para hacer una foto a una factura física. Esta se auto-enviará por correo para ser procesada al sincronizar.")
+    
+    # Campo de captura de cámara
+    img_file = st.camera_input("Haz la foto a la factura asegurando buena iluminación y enfoque:")
+    
+    if img_file is not None:
+        # Obtener los bytes de la imagen capturada
+        bytes_data = img_file.getvalue()
+        
+        # Mostrar vista previa
+        st.image(img_file, caption="Vista previa de la factura capturada", width=350)
+        
+        btn_enviar = st.button("✉️ Enviar factura a mi Gmail para procesar", use_container_width=True)
+        
+        if btn_enviar:
+            if not config.get("gmail_email") or not config.get("gmail_password"):
+                st.error("Introduce y guarda tu correo y contraseña de aplicación en el menú lateral izquierdo para poder realizar el envío.")
+            else:
+                with st.spinner("Enviando foto por correo electrónico..."):
+                    try:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"factura_foto_{timestamp}.jpg"
+                        
+                        send_image_to_gmail(
+                            config["gmail_email"],
+                            config["gmail_password"],
+                            bytes_data,
+                            filename
+                        )
+                        st.success(f"¡Factura enviada con éxito! Se ha mandado un correo a {config['gmail_email']} con el adjunto. Ahora puedes volver a la pestaña 'Sincronización' y pulsar en 'Sincronizar Gmail' para procesarla.")
+                    except Exception as e_send:
+                        st.error(f"Fallo al enviar el correo: {str(e_send)}")
     st.markdown("</div>", unsafe_allow_html=True)
